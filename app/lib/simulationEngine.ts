@@ -1,6 +1,10 @@
 import { AssetConfig, EXPANDED_ASSETS, ANALYST_NAMES } from '../data/assets';
 import { PLAYER_BACKGROUNDS } from '../data/playerBackgrounds';
 import { DIFFICULTY_MODES } from '../data/difficultyModes';
+import { InboxMessage, checkMessageExpirations, processEventChains, createInboxMessage } from './inboxEngine';
+import { tickCooldowns, isCooldownActive, applyCooldownForTriggeredEvent } from './eventCooldowns';
+import { GAME_EVENT_TEMPLATES } from './eventDefinitions';
+import { checkAuditEligibility } from './eventEligibility';
 
 // Normal distribution random generator
 function randomNormal(mean = 0, stddev = 1) {
@@ -104,6 +108,9 @@ export interface GameState {
   tradesCount: number;
   gameStatus?: 'PLAYING' | 'VICTORY' | 'BANKRUPTCY';
   debtWarningTurns?: number;
+  inbox: InboxMessage[];
+  cooldowns: Record<string, number>;
+  activeEventChains: Record<string, { triggerTurn: number }>;
 }
 
 // Math logic to advance the simulation clock by 1 tick (day)
@@ -589,26 +596,105 @@ export function executeGameTick(prev: GameState): GameState {
     }
   }
 
-  // 13. Trigger Legal Risk Scandals
-  if (legalRisk > 30 && Math.random() < (legalRisk / 1500) * difficultyConfig.legalRiskMultiplier) {
-    // Audit check triggers!
-    let fineAmount = Math.round(prev.cash * 0.15 + 10000);
-    nextCash -= fineAmount;
-    
-    eventLogs.unshift({
-      date: formattedDate,
-      headline: 'SEC AUDIT PENALTY: Regulatory compliance breach',
-      description: `Auditors discovered questionable leverage margins or lobbying logs. Surcharged $${fineAmount.toLocaleString()} administrative penalties. Public trust damaged.`,
-      isUrgent: true
+  // 13. Redesigned Event System & Inbox Engine Tick
+  const currentInbox = prev.inbox || [];
+  const currentCooldowns = prev.cooldowns || {};
+  const currentChains = prev.activeEventChains || {};
+
+  // Decrement cooldowns
+  let nextCooldowns = tickCooldowns({ ...prev, cooldowns: currentCooldowns });
+
+  // Update expired inbox messages
+  let nextInbox = checkMessageExpirations({ ...prev, inbox: currentInbox, turn: nextTurn });
+
+  // Process delayed event chains
+  const chainResult = processEventChains({
+    ...prev,
+    inbox: nextInbox,
+    activeEventChains: currentChains,
+    turn: nextTurn
+  });
+  let nextStateWithChains = chainResult.nextState;
+  nextInbox = [...nextInbox, ...chainResult.newMessages];
+
+  // Try to generate a new eligible event (2% chance per day)
+  if (Math.random() < 0.02) {
+    const eligibleTemplates = GAME_EVENT_TEMPLATES.filter(template => {
+      // Don't trigger if already active in the inbox
+      const alreadyActive = nextInbox.some(msg => msg.templateId === template.id && !msg.isActioned && !msg.isExpired);
+      if (alreadyActive) return false;
+
+      // Don't trigger chained steps manually
+      const isChainedStep = /_CHAIN_[2-9]/.test(template.id);
+      if (isChainedStep) return false;
+
+      // Check template conditions
+      let conditionMet = false;
+      try {
+        conditionMet = template.condition({
+          ...prev,
+          inbox: nextInbox,
+          cooldowns: nextCooldowns,
+          activeEventChains: nextStateWithChains.activeEventChains,
+          turn: nextTurn
+        });
+      } catch (e) {
+        console.error("Condition check failed for:", template.id, e);
+      }
+
+      if (!conditionMet) return false;
+
+      // Check category and event cooldowns
+      const cdActive = isCooldownActive(
+        { ...prev, cooldowns: nextCooldowns },
+        template
+      );
+      if (cdActive) return false;
+
+      return true;
     });
 
-    ledgerEntries.push({
-      id: `audit_fine_${nextTurn}`,
-      date: formattedDate,
-      type: 'LEGAL_FINE',
-      cashChange: -fineAmount,
-      description: `SEC compliance audit penalty. Asset seizure fine: -$${fineAmount.toLocaleString()}`
-    });
+    if (eligibleTemplates.length > 0) {
+      // Pick a random eligible template
+      const template = eligibleTemplates[Math.floor(Math.random() * eligibleTemplates.length)];
+      
+      // Fetch dynamic audit reason details if relevant
+      let triggerReason = undefined;
+      if (template.id === 'AUDIT_CHAIN_1') {
+        const check = checkAuditEligibility({
+          ...prev,
+          inbox: nextInbox,
+          cooldowns: nextCooldowns,
+          activeEventChains: nextStateWithChains.activeEventChains,
+          turn: nextTurn
+        });
+        triggerReason = check.reason;
+      }
+
+      const newMsg = createInboxMessage(
+        { ...prev, date: formattedDate, turn: nextTurn },
+        template,
+        triggerReason
+      );
+
+      nextInbox.push(newMsg);
+
+      // Set cooldowns
+      nextCooldowns = applyCooldownForTriggeredEvent(
+        { ...prev, cooldowns: nextCooldowns },
+        template
+      );
+
+      // Low priority events go directly to the global news marquee
+      if (template.priority === 'low') {
+        eventLogs.unshift({
+          date: formattedDate,
+          headline: template.subject,
+          description: template.body,
+          isUrgent: template.urgency === 'high' || template.urgency === 'critical'
+        });
+      }
+    }
   }
 
   return {
@@ -640,7 +726,10 @@ export function executeGameTick(prev: GameState): GameState {
       economicHealth: Math.round(economicHealth),
       inflation: parseFloat(inflation.toFixed(2))
     },
-    ledger: [...ledgerEntries, ...prev.ledger].slice(0, 100)
+    ledger: [...ledgerEntries, ...prev.ledger].slice(0, 100),
+    inbox: nextInbox,
+    cooldowns: nextCooldowns,
+    activeEventChains: nextStateWithChains.activeEventChains
   };
 }
 

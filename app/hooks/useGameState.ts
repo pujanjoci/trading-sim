@@ -34,8 +34,8 @@ export function useGameState() {
   const [mounted, setMounted] = useState(false);
 
   // Separate speed from tick state to keep intervals smooth
-  const [gameSpeed, setGameSpeed] = useState<number>(0);
-  const gameSpeedRef = useRef<number>(0);
+  const [gameSpeed, setGameSpeed] = useState<number>(1);
+  const gameSpeedRef = useRef<number>(1);
   gameSpeedRef.current = gameSpeed;
 
   const timerRef = useRef<NodeJS.Timeout | null>(null);
@@ -51,7 +51,11 @@ export function useGameState() {
       if (user) {
         setCurrentUser(user);
         if (user.gameState) {
-          setState(user.gameState);
+          const loadedState = { ...user.gameState };
+          if (!loadedState.inbox) loadedState.inbox = [];
+          if (!loadedState.cooldowns) loadedState.cooldowns = { global: 0 };
+          if (!loadedState.activeEventChains) loadedState.activeEventChains = {};
+          setState(loadedState);
         }
       }
     }
@@ -203,10 +207,14 @@ export function useGameState() {
       xp: 0,
       tutorialStep: 0, // Starts at choose background setup, advances to 1
       tutorialCompleted: false,
-      tradesCount: 0
+      tradesCount: 0,
+      inbox: [],
+      cooldowns: { global: 0 },
+      activeEventChains: {}
     };
 
     setState(startState);
+    setGameSpeed(1); // Set default speed to 1x on starting game
   };
 
   // Time Tick Loops
@@ -304,13 +312,6 @@ export function useGameState() {
           nextState.debtWarningTurns = 0;
         }
       }
-
-      // Check random decision popup opportunities
-      // 1.5% chance per tick if speed is active, no prompt is open, and setup is complete
-      if (!activePrompt && Math.random() < 0.015 && nextState.tutorialStep > 0) {
-        // Schedule popup hook outside of render (handled below)
-      }
-
       return nextState;
     });
   };
@@ -367,16 +368,26 @@ export function useGameState() {
     }
   }, [state, setGameSpeed]);
 
-  // General decision prompt scheduler side effect
+  // Watch for incoming critical messages to launch blocking modals
   useEffect(() => {
-    if (state && !activePrompt && gameSpeed > 0 && Math.random() < 0.015 && state.tutorialStep > 0) {
-      // Pick a random prompt
-      const promptTemplates = require('../utils/gameData').DECISION_PROMPTS;
-      const selected = promptTemplates[Math.floor(Math.random() * promptTemplates.length)];
+    if (!state) return;
+    
+    // Find any unread critical message that is not actioned or expired
+    const criticalMsg = (state.inbox || []).find(msg => 
+      msg.urgency === 'critical' && !msg.isActioned && !msg.isExpired && !msg.isRead
+    );
+
+    if (criticalMsg && !activePrompt) {
+      // Pause simulation
       setGameSpeed(0);
-      setActivePrompt(selected);
+      setActivePrompt({
+        id: criticalMsg.id,
+        title: criticalMsg.subject,
+        description: criticalMsg.body,
+        choices: criticalMsg.choices || []
+      });
     }
-  }, [state, gameSpeed]);
+  }, [state, activePrompt]);
 
   // Trading functions
   const buyAsset = (assetId: string, quantity: number) => {
@@ -1229,6 +1240,13 @@ export function useGameState() {
 
   const handleDecision = (choiceIndex: number) => {
     if (!activePrompt || !state) return;
+    
+    // Check if the prompt is an inbox message
+    if (activePrompt.id && activePrompt.id.startsWith('msg_')) {
+      actionInboxMessage(activePrompt.id, choiceIndex);
+      return;
+    }
+
     const choice = activePrompt.choices[choiceIndex];
 
     const noneAffordable = activePrompt.choices.every((c: any) => state.cash < c.cost);
@@ -1318,6 +1336,161 @@ export function useGameState() {
 
     setShowPromptOutcome(choice.outcomeDescription);
     setActivePrompt(null);
+  };
+
+  const actionInboxMessage = (messageId: string, choiceIndex: number) => {
+    setState(prev => {
+      if (!prev) return null;
+      const msg = (prev.inbox || []).find(m => m.id === messageId);
+      if (!msg || !msg.choices) return prev;
+
+      const choice = msg.choices[choiceIndex];
+      const cost = choice.cost;
+
+      // Apply cost to cash. If insufficient, add to debt (margin borrow)
+      let nextCash = prev.cash - cost;
+      let nextDebt = prev.debt;
+      if (nextCash < 0) {
+        nextDebt += Math.abs(nextCash);
+        nextCash = 0;
+      }
+
+      // Apply other effects
+      const effects = choice.effects;
+      let nextReputationPublic = Math.max(0, Math.min(100, prev.reputationPublic + (effects.reputationPublicChange || 0)));
+      let nextReputationCorporate = Math.max(0, Math.min(100, prev.reputationCorporate + (effects.reputationCorporateChange || 0)));
+      let nextReputationPolitical = Math.max(0, Math.min(100, prev.reputationPolitical + (effects.reputationPoliticalChange || 0)));
+      
+      const diffConfig = DIFFICULTY_MODES.find(d => d.id === prev.difficulty) || DIFFICULTY_MODES[1];
+      let nextLegalRisk = prev.legalRisk + (effects.legalRiskChange || 0) * diffConfig.legalRiskMultiplier;
+      // Add bribe extra risk check
+      if (choice.text.toLowerCase().includes('bribe') || choice.text.toLowerCase().includes('insider') || choice.text.toLowerCase().includes('shady')) {
+        nextLegalRisk += 25 * diffConfig.legalRiskMultiplier;
+      }
+      nextLegalRisk = Math.max(0, Math.min(100, nextLegalRisk));
+
+      let nextMediaSuspicion = Math.max(0, Math.min(100, prev.mediaSuspicion + (effects.mediaSuspicionChange || 0)));
+      let nextPoliticalInfluence = Math.max(0, prev.politicalInfluence + (effects.politicalInfluenceChange || 0));
+
+      // Apply price shocks
+      const nextPrices = { ...prev.currentPrices };
+      if (effects.assetPriceShocks) {
+        Object.keys(effects.assetPriceShocks).forEach(assetId => {
+          const shock = effects.assetPriceShocks![assetId];
+          const rawPrice = nextPrices[assetId] * (1 + shock);
+          const floor = assetId === 'MEME' ? 0.005 : 0.10;
+          nextPrices[assetId] = parseFloat(Math.max(floor, Math.min(9999, rawPrice)).toFixed(2));
+        });
+      }
+
+      // Geopolitical metric changes
+      const tension = prev.geopoliticalMetrics.globalTension + (effects.metricChanges?.globalTension || 0);
+      const pandemic = prev.geopoliticalMetrics.pandemicLevel + (effects.metricChanges?.pandemicLevel || 0);
+      const health = prev.geopoliticalMetrics.economicHealth + (effects.metricChanges?.economicHealth || 0);
+      const inflation = prev.geopoliticalMetrics.inflation + (effects.metricChanges?.inflation || 0);
+
+      // Unlocked insider info
+      const nextInsider = [...prev.insiderInfo];
+      if (effects.unlockedInsiderInfo) {
+        nextInsider.unshift({
+          text: effects.unlockedInsiderInfo,
+          dateAdded: prev.date
+        });
+      }
+
+      // Add to active event chains if chain triggered
+      const nextChains = { ...prev.activeEventChains };
+      if (effects.triggerEventChainId) {
+        nextChains[effects.triggerEventChainId] = {
+          triggerTurn: prev.turn + (effects.triggerEventChainDelay || 5)
+        };
+      }
+
+      // Add event log
+      const nextEventLogs = [...prev.eventLogs];
+      nextEventLogs.unshift({
+        date: prev.date,
+        headline: `DIRECTIVE DECISION: ${msg.subject}`,
+        description: choice.outcomeDescription
+      });
+
+      // Update message status in the inbox
+      const nextInbox = prev.inbox.map(m => {
+        if (m.id === messageId) {
+          return {
+            ...m,
+            isActioned: true,
+            isRead: true,
+            selectedChoiceIndex: choiceIndex
+          };
+        }
+        return m;
+      });
+
+      return {
+        ...prev,
+        cash: parseFloat(nextCash.toFixed(2)),
+        debt: parseFloat(nextDebt.toFixed(2)),
+        reputationPublic: nextReputationPublic,
+        reputationCorporate: nextReputationCorporate,
+        reputationPolitical: nextReputationPolitical,
+        legalRisk: nextLegalRisk,
+        mediaSuspicion: nextMediaSuspicion,
+        politicalInfluence: nextPoliticalInfluence,
+        currentPrices: nextPrices,
+        insiderInfo: nextInsider,
+        activeEventChains: nextChains,
+        geopoliticalMetrics: {
+          globalTension: Math.max(0, Math.min(100, tension)),
+          pandemicLevel: Math.max(0, Math.min(100, pandemic)),
+          economicHealth: Math.max(0, Math.min(100, health)),
+          inflation: parseFloat(Math.max(-5.0, Math.min(25.0, inflation)).toFixed(2))
+        },
+        eventLogs: nextEventLogs,
+        ledger: [
+          {
+            id: `msg_action_${messageId}_${Date.now()}`,
+            date: prev.date,
+            type: 'EVENT',
+            cashChange: -cost,
+            description: choice.outcomeDescription
+          },
+          ...prev.ledger
+        ].slice(0, 100),
+        inbox: nextInbox
+      };
+    });
+
+    // Adapt EventModal's state so we show outcome descriptions
+    const msg = state?.inbox.find(m => m.id === messageId);
+    if (msg && msg.choices) {
+      setShowPromptOutcome(msg.choices[choiceIndex].outcomeDescription);
+    }
+    setActivePrompt(null);
+  };
+
+  const archiveInboxMessage = (messageId: string) => {
+    setState(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        inbox: (prev.inbox || []).map(msg => 
+          msg.id === messageId ? { ...msg, isArchived: true } : msg
+        )
+      };
+    });
+  };
+
+  const readInboxMessage = (messageId: string) => {
+    setState(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        inbox: (prev.inbox || []).map(msg => 
+          msg.id === messageId ? { ...msg, isRead: true } : msg
+        )
+      };
+    });
   };
 
   const closeOutcomeModal = () => {
@@ -1424,6 +1597,10 @@ export function useGameState() {
     registerUser,
     loginUser,
     logoutUser,
-    resetUserProgress
+    resetUserProgress,
+    actionInboxMessage,
+    archiveInboxMessage,
+    readInboxMessage,
+    setStateOverride: setState
   };
 }

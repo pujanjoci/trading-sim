@@ -16,6 +16,7 @@ import {
   Bot,
   UserCircle
 } from 'lucide-react';
+import { InboxNotificationBell } from './inbox/InboxNotificationBell';
 
 const AVATAR_ICON_MAP: Record<string, React.ComponentType<{size?: number; className?: string}>> = {
   briefcase: Briefcase,
@@ -64,6 +65,7 @@ interface PortfolioSummaryProps {
   resetGame: () => void;
   currentUser: any;
   logoutUser: () => void;
+  setActiveConsoleTab?: (tab: 'TRADE' | 'OPTIONS' | 'BOARDROOM' | 'POLITICS' | 'ACCOUNT' | 'DEBUG' | 'INBOX') => void;
 }
 
 export function PortfolioSummary({
@@ -77,7 +79,8 @@ export function PortfolioSummary({
   withdrawSavings,
   resetGame,
   currentUser,
-  logoutUser
+  logoutUser,
+  setActiveConsoleTab
 }: PortfolioSummaryProps) {
   const [showLoanModal, setShowLoanModal] = useState(false);
   const [loanAmount, setLoanAmount] = useState<string>('25000');
@@ -351,6 +354,12 @@ export function PortfolioSummary({
 
       {/* User profile & Logout */}
       <div className="flex items-center justify-between lg:justify-end gap-4 z-10 select-none">
+        {state && state.inbox && setActiveConsoleTab && (
+          <InboxNotificationBell
+            unreadCount={state.inbox.filter(m => !m.isRead && !m.isArchived).length}
+            onClick={() => setActiveConsoleTab('INBOX')}
+          />
+        )}
         {currentUser && (
           <div className="flex items-center gap-2.5 bg-zinc-900/40 border border-zinc-800 px-3 py-1.5 rounded-xl text-xs font-mono">
             <span className="text-sm font-sans flex items-center justify-center w-7 h-7 rounded-lg bg-cyan-950/50 border border-cyan-800/40">

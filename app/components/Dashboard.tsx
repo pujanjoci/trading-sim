@@ -12,6 +12,9 @@ import { Boardroom } from './Boardroom';
 import { Politics } from './Politics';
 import { OptionsDesk } from './OptionsDesk';
 import { TutorialPanel } from './TutorialPanel';
+import { InboxPanel } from './inbox/InboxPanel';
+import { InboxNotificationBell } from './inbox/InboxNotificationBell';
+import { DebugStation } from './debug/DebugStation';
 import { EXPANDED_ASSETS, AssetConfig } from '../data/assets';
 import { GameState } from '../lib/simulationEngine';
 import { PLAYER_BACKGROUNDS } from '../data/playerBackgrounds';
@@ -42,7 +45,8 @@ import {
   Bot,
   Gauge,
   Shield,
-  CircleDollarSign
+  CircleDollarSign,
+  Mail
 } from 'lucide-react';
 
 const AVATAR_OPTIONS = [
@@ -98,7 +102,11 @@ export function Dashboard() {
     registerUser,
     loginUser,
     logoutUser,
-    resetUserProgress
+    resetUserProgress,
+    actionInboxMessage,
+    archiveInboxMessage,
+    readInboxMessage,
+    setStateOverride
   } = useGameState();
 
   // Character Setup States
@@ -109,7 +117,7 @@ export function Dashboard() {
   // Main UI States
   const [selectedAssetId, setSelectedAssetId] = useState<string>('FRUT');
   const [tradeQuantity, setTradeQuantity] = useState<string>('50');
-  const [activeConsoleTab, setActiveConsoleTab] = useState<'TRADE' | 'OPTIONS' | 'BOARDROOM' | 'POLITICS' | 'ACCOUNT' | 'DEBUG'>('TRADE');
+  const [activeConsoleTab, setActiveConsoleTab] = useState<'TRADE' | 'OPTIONS' | 'BOARDROOM' | 'POLITICS' | 'ACCOUNT' | 'DEBUG' | 'INBOX'>('TRADE');
   const [logTab, setLogTab] = useState<'TRANSACTIONS' | 'WORLD_EVENTS'>('TRANSACTIONS');
   const [isSidebarExpanded, setIsSidebarExpanded] = useState<boolean>(false);
 
@@ -649,6 +657,7 @@ export function Dashboard() {
         resetGame={resetGame}
         currentUser={currentUser}
         logoutUser={logoutUser}
+        setActiveConsoleTab={setActiveConsoleTab}
       />
 
       {/* Main dashboard grid */}
@@ -692,6 +701,7 @@ export function Dashboard() {
               { id: 'OPTIONS', label: 'OPTIONS CHAIN', Icon: Wallet },
               { id: 'BOARDROOM', label: 'BOARDROOM STRATEGY', Icon: Building2 },
               { id: 'POLITICS', label: 'CAMPAIGNS & BILLS', Icon: Landmark },
+              { id: 'INBOX', label: 'MESSAGES', Icon: Mail, badge: state && state.inbox ? state.inbox.filter(m => !m.isRead && !m.isArchived).length : 0 },
               { id: 'ACCOUNT', label: 'MY ACCOUNT', Icon: UserCircle },
               ...(isDebugUnlocked ? [{ id: 'DEBUG', label: 'DEBUG PANEL', Icon: Settings }] : [])
             ].map((tab) => {
@@ -703,11 +713,16 @@ export function Dashboard() {
                   className={`pb-2 px-3 transition-all border-b-2 flex items-center gap-1.5 ${
                     activeConsoleTab === tab.id
                       ? 'border-cyan-500 text-cyan-400 font-bold'
-                      : 'border-transparent text-zinc-500 hover:text-zinc-300'
+                      : 'border-transparent text-zinc-550 hover:text-zinc-300'
                   }`}
                 >
                   <IconComponent size={13} />
                   <span>{tab.label}</span>
+                  {tab.badge !== undefined && tab.badge > 0 && (
+                    <span className="px-1.5 py-0.2 rounded-full bg-rose-500 text-[8px] font-black text-white border border-zinc-950 animate-pulse-glow">
+                      {tab.badge}
+                    </span>
+                  )}
                 </button>
               );
             })}
@@ -1111,138 +1126,25 @@ export function Dashboard() {
               />
             )}
 
+            {activeConsoleTab === 'INBOX' && (
+              <InboxPanel
+                state={state}
+                onActionMessage={actionInboxMessage}
+                onArchiveMessage={archiveInboxMessage}
+                onReadMessage={readInboxMessage}
+              />
+            )}
+
             {activeConsoleTab === 'DEBUG' && isDebugUnlocked && (
-              <div className="bg-zinc-950/80 border border-zinc-800/80 rounded-xl p-5 backdrop-blur-md glow-rose flex flex-col justify-between relative overflow-hidden h-full min-h-[380px]">
-                <div className="absolute inset-0 scanline pointer-events-none opacity-20"></div>
-                
-                <div>
-                  <div className="flex justify-between items-center border-b border-zinc-850 pb-3 mb-4">
-                    <h3 className="text-xs font-black font-mono text-rose-500 uppercase tracking-widest flex items-center gap-1.5">
-                      <Zap size={13} className="text-rose-500" /> <span>SYSTEM ADMINISTRATIVE OVERRIDE</span>
-                    </h3>
-                    <span className="text-[8px] px-2 py-0.5 rounded bg-rose-950 border border-rose-800 text-rose-300 font-bold font-mono">DEBUG MODE ACTIVE</span>
-                  </div>
-
-                  <p className="text-[10px] text-zinc-500 font-mono mb-4 uppercase">Select debugging actions to inject state changes directly into the running instance.</p>
-
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 font-mono text-xs">
-                    {/* Add Cash */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Capital Infusion</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Credit positive capital assets to game account.</p>
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => triggerCheat('ADD_CASH', 500000)}
-                          className="flex-1 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors text-[9.5px] font-bold"
-                        >
-                          +$500k
-                        </button>
-                        <button
-                          onClick={() => triggerCheat('ADD_CASH', 10000000)}
-                          className="flex-1 py-1.5 rounded bg-emerald-950 hover:bg-emerald-900 text-emerald-300 border border-emerald-900 transition-colors text-[9.5px] font-bold"
-                        >
-                          +$10M
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Liability restructures */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Liability Restructuring</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Wipe clean bank loans and current debt balances.</p>
-                      </div>
-                      <button
-                        onClick={() => triggerCheat('CLEAR_DEBT')}
-                        className="w-full py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors text-[10px] font-bold"
-                      >
-                        SETTLE ALL DEBT ($0)
-                      </button>
-                    </div>
-
-                    {/* Promote Career */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Executive Power</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Elevate campaign rank directly to President/PM with max influence.</p>
-                      </div>
-                      <button
-                        onClick={() => triggerCheat('MAX_POLITICS')}
-                        className="w-full py-1.5 rounded bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-900 transition-colors text-[10px] font-bold uppercase tracking-wider"
-                      >
-                        Seize Executive Power
-                      </button>
-                    </div>
-
-                    {/* Reputation & Legal Audit */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Audit Risk Sweep</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Restore reputations, erase suspicion and legal risks.</p>
-                      </div>
-                      <button
-                        onClick={() => triggerCheat('RESET_REPUTATION')}
-                        className="w-full py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors text-[10px] font-bold"
-                      >
-                        SWEEP AUDIT RISK & SUSPICION
-                      </button>
-                    </div>
-
-                    {/* Force Events */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Event Horizon Injection</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Force trigger the AGI Singularity event or a random global geopolitical event.</p>
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => triggerCheat('FORCE_AI_BREAKTHROUGH')}
-                          className="flex-1 py-1.5 rounded bg-cyan-950 hover:bg-cyan-900 text-cyan-300 border border-cyan-900 transition-colors text-[9.5px] font-bold"
-                        >
-                          AGI SINGULARITY
-                        </button>
-                        <button
-                          onClick={() => triggerCheat('FORCE_EVENT')}
-                          className="flex-1 py-1.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition-colors text-[9.5px] font-bold"
-                        >
-                          RANDOM EVENT
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Force Decision Directive */}
-                    <div className="bg-zinc-900 border border-zinc-850 p-3 rounded-lg flex flex-col justify-between gap-3">
-                      <div>
-                        <span className="text-zinc-400 font-bold">Directive Popup Override</span>
-                        <p className="text-[9.5px] text-zinc-500 mt-0.5">Inject an urgent interactive boardroom or compliance decision prompt immediately.</p>
-                      </div>
-                      <button
-                        onClick={() => triggerCheat('FORCE_PROMPT')}
-                        className="w-full py-1.5 rounded bg-rose-950 hover:bg-rose-900 text-rose-300 border border-rose-900 transition-colors text-[10px] font-bold"
-                      >
-                        INJECT DECISION PROMPT
-                      </button>
-                    </div>
-
-                  </div>
-                </div>
-
-                <div className="mt-4 border-t border-zinc-900 pt-3 flex justify-between select-none">
-                  <span className="text-[9.5px] text-zinc-600 font-bold uppercase">Authorized console bypass active</span>
-                  <button
-                    onClick={() => {
-                      localStorage.removeItem('ultra_trading_sim_debug');
-                      setIsDebugUnlocked(false);
-                      setActiveConsoleTab('TRADE');
-                    }}
-                    className="text-[9.5px] text-rose-500 hover:text-rose-450 font-bold uppercase"
-                  >
-                    Lock Debug Panel
-                  </button>
-                </div>
-              </div>
+              <DebugStation
+                state={state}
+                setStateOverride={setStateOverride}
+                onClose={() => {
+                  localStorage.removeItem('ultra_trading_sim_debug');
+                  setIsDebugUnlocked(false);
+                  setActiveConsoleTab('TRADE');
+                }}
+              />
             )}
 
             {activeConsoleTab === 'POLITICS' && (
